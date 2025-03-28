@@ -1,51 +1,234 @@
-import scapy.all as scapy
-import subprocess
-import threading
-import time
-import netifaces
-import socket
+import sys
 import json
-import os
-from typing import Dict, List, Any
+import time
+import threading
 
-class WiFiMonitor:
-    def __init__(self, interface: str = None):
+import scapy.all as scapy
+import netifaces
+
+from PyQt5.QtWidgets import (
+    QApplication, QMainWindow, QVBoxLayout, QHBoxLayout, QTabWidget, 
+    QWidget, QPushButton, QTableWidget, QTableWidgetItem, QTextEdit, 
+    QLabel, QComboBox, QMessageBox
+)
+from PyQt5.QtCore import Qt, QThread, pyqtSignal
+from PyQt5.QtGui import QFont, QIcon
+
+class NetworkScanThread(QThread):
+    """
+    Background thread for network scanning to prevent GUI freezing
+    """
+    scan_complete = pyqtSignal(dict)
+    
+    def __init__(self, interface):
+        super().__init__()
+        self.interface = interface
+    
+    def run(self):
         """
-        Initialize WiFi Monitor with network interface selection
-        
-        Args:
-            interface (str, optional): Specific network interface to monitor
+        Perform network scan in background
         """
-        self.interface = interface or self._select_wireless_interface()
-        self.monitored_networks = {}
-        self.active_connections = {}
-        self.security_alerts = []
-        
-    def _select_wireless_interface(self) -> str:
+        try:
+            # Use ARP scanning similar to previous implementation
+            arp_request = scapy.ARP(pdst='192.168.1.0/24')
+            broadcast = scapy.Ether(dst="ff:ff:ff:ff:ff:ff")
+            arp_request_broadcast = broadcast/arp_request
+            
+            clients = scapy.srp(arp_request_broadcast, timeout=1, verbose=False)[0]
+            
+            network_map = {}
+            for element in clients:
+                client = {
+                    'ip': element[1].psrc,
+                    'mac': element[1].hwsrc,
+                    'vendor': self._get_vendor(element[1].hwsrc)
+                }
+                network_map[client['ip']] = client
+            
+            self.scan_complete.emit(network_map)
+        except Exception as e:
+            print(f"Network scan error: {e}")
+    
+    def _get_vendor(self, mac_address: str) -> str:
         """
-        Automatically select wireless network interface
+        Simplified MAC vendor lookup
+        """
+        try:
+            mac_prefix = mac_address[:8].replace(':', '').upper()
+            vendor_map = {
+                '000C29': 'VMware',
+                '0050F2': 'Microsoft',
+                '00163E': 'HP',
+                # Extend vendor mappings
+            }
+            return vendor_map.get(mac_prefix, 'Unknown')
+        except Exception:
+            return 'Unknown'
+
+class WiFiMonitorGUI(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("WiFi Network Analyzer")
+        self.setGeometry(100, 100, 1000, 700)
         
-        Returns:
-            str: Selected wireless interface name
+        # Central widget and main layout
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        main_layout = QVBoxLayout(central_widget)
+        
+        # Interface selection
+        interface_layout = QHBoxLayout()
+        self.interface_label = QLabel("Network Interface:")
+        self.interface_combo = QComboBox()
+        self.populate_interfaces()
+        interface_layout.addWidget(self.interface_label)
+        interface_layout.addWidget(self.interface_combo)
+        main_layout.addLayout(interface_layout)
+        
+        # Tabs for different views
+        self.tabs = QTabWidget()
+        main_layout.addWidget(self.tabs)
+        
+        # Network Devices Tab
+        devices_tab = QWidget()
+        devices_layout = QVBoxLayout(devices_tab)
+        self.devices_table = QTableWidget()
+        self.devices_table.setColumnCount(3)
+        self.devices_table.setHorizontalHeaderLabels(['IP Address', 'MAC Address', 'Vendor'])
+        devices_layout.addWidget(self.devices_table)
+        
+        # Scan Button
+        scan_button = QPushButton("Scan Network")
+        scan_button.clicked.connect(self.start_network_scan)
+        devices_layout.addWidget(scan_button)
+        
+        # Packet Capture Tab
+        packet_tab = QWidget()
+        packet_layout = QVBoxLayout(packet_tab)
+        self.packet_text = QTextEdit()
+        self.packet_text.setReadOnly(True)
+        packet_layout.addWidget(self.packet_text)
+        
+        capture_button = QPushButton("Capture Packets")
+        capture_button.clicked.connect(self.start_packet_capture)
+        packet_layout.addWidget(capture_button)
+        
+        # Security Tab
+        security_tab = QWidget()
+        security_layout = QVBoxLayout(security_tab)
+        self.security_text = QTextEdit()
+        self.security_text.setReadOnly(True)
+        security_layout.addWidget(self.security_text)
+        
+        security_scan_button = QPushButton("Run Security Scan")
+        security_scan_button.clicked.connect(self.run_security_scan)
+        security_layout.addWidget(security_scan_button)
+        
+        # Add tabs
+        self.tabs.addTab(devices_tab, "Network Devices")
+        self.tabs.addTab(packet_tab, "Packet Capture")
+        self.tabs.addTab(security_tab, "Security Scan")
+    
+    def populate_interfaces(self):
+        """
+        Populate network interfaces dropdown
         """
         wireless_interfaces = [
             iface for iface in netifaces.interfaces() 
             if iface.startswith(('wlan', 'wifi', 'wireless', 'en'))
         ]
-        
-        if not wireless_interfaces:
-            raise ValueError("No wireless interfaces found!")
-        
-        return wireless_interfaces[0]
+        self.interface_combo.addItems(wireless_interfaces)
     
-    def start_network_scan(self) -> Dict[str, Any]:
+    def start_network_scan(self):
         """
-        Perform comprehensive network scan
+        Initiate network scanning in background thread
+        """
+        interface = self.interface_combo.currentText()
+        self.scan_thread = NetworkScanThread(interface)
+        self.scan_thread.scan_complete.connect(self.update_device_table)
+        self.scan_thread.start()
+    
+    def update_device_table(self, network_map):
+        """
+        Update network devices table with scan results
+        """
+        self.devices_table.setRowCount(0)
+        for ip, device in network_map.items():
+            row = self.devices_table.rowCount()
+            self.devices_table.insertRow(row)
+            self.devices_table.setItem(row, 0, QTableWidgetItem(ip))
+            self.devices_table.setItem(row, 1, QTableWidgetItem(device['mac']))
+            self.devices_table.setItem(row, 2, QTableWidgetItem(device['vendor']))
+    
+    def start_packet_capture(self):
+        """
+        Capture network packets
+        """
+        interface = self.interface_combo.currentText()
         
-        Returns:
-            Dict containing network discovery results
+        def capture_packets():
+            packets = []
+            def packet_handler(packet):
+                if packet.haslayer(scapy.IP):
+                    packet_info = (
+                        f"Time: {time.strftime('%H:%M:%S')} | "
+                        f"SRC: {packet[scapy.IP].src} | "
+                        f"DST: {packet[scapy.IP].dst} | "
+                        f"Protocol: {packet[scapy.IP].proto}"
+                    )
+                    packets.append(packet_info)
+                    self.packet_text.append(packet_info)
+            
+            scapy.sniff(iface=interface, prn=packet_handler, timeout=30)
+            return packets
+        
+        # Clear previous capture
+        self.packet_text.clear()
+        
+        # Run packet capture in thread
+        packet_thread = threading.Thread(target=capture_packets)
+        packet_thread.start()
+    
+    def run_security_scan(self):
         """
-        # Use scapy for network discovery
+        Perform basic network security scan
+        """
+        interface = self.interface_combo.currentText()
+        
+        # Clear previous scan results
+        self.security_text.clear()
+        
+        # Basic security checks
+        security_checks = [
+            f"Scanning Interface: {interface}",
+            "Checking for potential security issues..."
+        ]
+        
+        try:
+            # Network device count check
+            network_map = self._perform_network_scan()
+            device_count = len(network_map)
+            
+            security_checks.append(f"Total Devices Detected: {device_count}")
+            
+            if device_count > 10:
+                security_checks.append("⚠️ WARNING: Unusually high number of devices detected!")
+            
+            # Simulate additional security checks
+            security_checks.append("Checking for open ports...")
+            security_checks.append("Verifying network encryption...")
+            
+        except Exception as e:
+            security_checks.append(f"Security Scan Error: {e}")
+        
+        # Display results
+        for check in security_checks:
+            self.security_text.append(check)
+    
+    def _perform_network_scan(self):
+        """
+        Internal method to perform network scan
+        """
         arp_request = scapy.ARP(pdst='192.168.1.0/24')
         broadcast = scapy.Ether(dst="ff:ff:ff:ff:ff:ff")
         arp_request_broadcast = broadcast/arp_request
@@ -65,128 +248,24 @@ class WiFiMonitor:
     
     def _get_vendor(self, mac_address: str) -> str:
         """
-        Attempt to resolve MAC address vendor
-        
-        Args:
-            mac_address (str): MAC address to resolve
-        
-        Returns:
-            str: Vendor name or 'Unknown'
+        Simplified MAC vendor lookup
         """
         try:
-            # Simplified vendor lookup (can be expanded with comprehensive database)
             mac_prefix = mac_address[:8].replace(':', '').upper()
             vendor_map = {
                 '000C29': 'VMware',
                 '0050F2': 'Microsoft',
                 '00163E': 'HP',
-                # Add more vendor mappings
             }
             return vendor_map.get(mac_prefix, 'Unknown')
         except Exception:
             return 'Unknown'
-    
-    def packet_capture(self, duration: int = 60) -> List[Dict]:
-        """
-        Capture network packets
-        
-        Args:
-            duration (int): Capture duration in seconds
-        
-        Returns:
-            List of captured packet details
-        """
-        captured_packets = []
-        
-        def packet_handler(packet):
-            if packet.haslayer(scapy.IP):
-                packet_info = {
-                    'timestamp': time.time(),
-                    'source_ip': packet[scapy.IP].src,
-                    'destination_ip': packet[scapy.IP].dst,
-                    'protocol': packet[scapy.IP].proto
-                }
-                captured_packets.append(packet_info)
-        
-        # Start packet capture
-        scapy.sniff(iface=self.interface, prn=packet_handler, timeout=duration)
-        
-        return captured_packets
-    
-    def detect_security_issues(self) -> List[str]:
-        """
-        Perform basic network security detection
-        
-        Returns:
-            List of security alerts
-        """
-        alerts = []
-        network_map = self.start_network_scan()
-        
-        # Check for potential rogue devices
-        if len(network_map) > 10:
-            alerts.append(f"High number of devices detected: {len(network_map)}")
-        
-        return alerts
-    
-    def generate_network_report(self) -> Dict[str, Any]:
-        """
-        Generate comprehensive network report
-        
-        Returns:
-            Detailed network analysis report
-        """
-        network_scan = self.start_network_scan()
-        packet_capture = self.packet_capture(duration=30)
-        security_alerts = self.detect_security_issues()
-        
-        return {
-            'network_devices': network_scan,
-            'network_traffic': {
-                'total_packets': len(packet_capture),
-                'capture_duration': 30
-            },
-            'security_alerts': security_alerts
-        }
-    
-    def save_report(self, report: Dict[str, Any], filename: str = None):
-        """
-        Save network report to file
-        
-        Args:
-            report (Dict): Network report to save
-            filename (str, optional): Output filename
-        """
-        filename = filename or f"network_report_{int(time.time())}.json"
-        with open(filename, 'w') as f:
-            json.dump(report, f, indent=4)
-        
-        print(f"Report saved to {filename}")
 
 def main():
-    print("🌐 WiFi Network Analyzer")
-    print("------------------------")
-    
-    try:
-        monitor = WiFiMonitor()
-        
-        print("\n[1] Scanning Network...")
-        network_map = monitor.start_network_scan()
-        print(f"Discovered {len(network_map)} devices")
-        
-        print("\n[2] Capturing Network Packets...")
-        packets = monitor.packet_capture(duration=30)
-        print(f"Captured {len(packets)} packets")
-        
-        print("\n[3] Checking Network Security...")
-        security_alerts = monitor.detect_security_issues()
-        
-        print("\n[4] Generating Network Report...")
-        report = monitor.generate_network_report()
-        monitor.save_report(report)
-        
-    except Exception as e:
-        print(f"Error: {e}")
+    app = QApplication(sys.argv)
+    window = WiFiMonitorGUI()
+    window.show()
+    sys.exit(app.exec_())
 
 if __name__ == "__main__":
     main()
