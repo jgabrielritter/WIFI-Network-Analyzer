@@ -1,0 +1,192 @@
+import scapy.all as scapy
+import subprocess
+import threading
+import time
+import netifaces
+import socket
+import json
+import os
+from typing import Dict, List, Any
+
+class WiFiMonitor:
+    def __init__(self, interface: str = None):
+        """
+        Initialize WiFi Monitor with network interface selection
+        
+        Args:
+            interface (str, optional): Specific network interface to monitor
+        """
+        self.interface = interface or self._select_wireless_interface()
+        self.monitored_networks = {}
+        self.active_connections = {}
+        self.security_alerts = []
+        
+    def _select_wireless_interface(self) -> str:
+        """
+        Automatically select wireless network interface
+        
+        Returns:
+            str: Selected wireless interface name
+        """
+        wireless_interfaces = [
+            iface for iface in netifaces.interfaces() 
+            if iface.startswith(('wlan', 'wifi', 'wireless', 'en'))
+        ]
+        
+        if not wireless_interfaces:
+            raise ValueError("No wireless interfaces found!")
+        
+        return wireless_interfaces[0]
+    
+    def start_network_scan(self) -> Dict[str, Any]:
+        """
+        Perform comprehensive network scan
+        
+        Returns:
+            Dict containing network discovery results
+        """
+        # Use scapy for network discovery
+        arp_request = scapy.ARP(pdst='192.168.1.0/24')
+        broadcast = scapy.Ether(dst="ff:ff:ff:ff:ff:ff")
+        arp_request_broadcast = broadcast/arp_request
+        
+        clients = scapy.srp(arp_request_broadcast, timeout=1, verbose=False)[0]
+        
+        network_map = {}
+        for element in clients:
+            client = {
+                'ip': element[1].psrc,
+                'mac': element[1].hwsrc,
+                'vendor': self._get_vendor(element[1].hwsrc)
+            }
+            network_map[client['ip']] = client
+        
+        return network_map
+    
+    def _get_vendor(self, mac_address: str) -> str:
+        """
+        Attempt to resolve MAC address vendor
+        
+        Args:
+            mac_address (str): MAC address to resolve
+        
+        Returns:
+            str: Vendor name or 'Unknown'
+        """
+        try:
+            # Simplified vendor lookup (can be expanded with comprehensive database)
+            mac_prefix = mac_address[:8].replace(':', '').upper()
+            vendor_map = {
+                '000C29': 'VMware',
+                '0050F2': 'Microsoft',
+                '00163E': 'HP',
+                # Add more vendor mappings
+            }
+            return vendor_map.get(mac_prefix, 'Unknown')
+        except Exception:
+            return 'Unknown'
+    
+    def packet_capture(self, duration: int = 60) -> List[Dict]:
+        """
+        Capture network packets
+        
+        Args:
+            duration (int): Capture duration in seconds
+        
+        Returns:
+            List of captured packet details
+        """
+        captured_packets = []
+        
+        def packet_handler(packet):
+            if packet.haslayer(scapy.IP):
+                packet_info = {
+                    'timestamp': time.time(),
+                    'source_ip': packet[scapy.IP].src,
+                    'destination_ip': packet[scapy.IP].dst,
+                    'protocol': packet[scapy.IP].proto
+                }
+                captured_packets.append(packet_info)
+        
+        # Start packet capture
+        scapy.sniff(iface=self.interface, prn=packet_handler, timeout=duration)
+        
+        return captured_packets
+    
+    def detect_security_issues(self) -> List[str]:
+        """
+        Perform basic network security detection
+        
+        Returns:
+            List of security alerts
+        """
+        alerts = []
+        network_map = self.start_network_scan()
+        
+        # Check for potential rogue devices
+        if len(network_map) > 10:
+            alerts.append(f"High number of devices detected: {len(network_map)}")
+        
+        return alerts
+    
+    def generate_network_report(self) -> Dict[str, Any]:
+        """
+        Generate comprehensive network report
+        
+        Returns:
+            Detailed network analysis report
+        """
+        network_scan = self.start_network_scan()
+        packet_capture = self.packet_capture(duration=30)
+        security_alerts = self.detect_security_issues()
+        
+        return {
+            'network_devices': network_scan,
+            'network_traffic': {
+                'total_packets': len(packet_capture),
+                'capture_duration': 30
+            },
+            'security_alerts': security_alerts
+        }
+    
+    def save_report(self, report: Dict[str, Any], filename: str = None):
+        """
+        Save network report to file
+        
+        Args:
+            report (Dict): Network report to save
+            filename (str, optional): Output filename
+        """
+        filename = filename or f"network_report_{int(time.time())}.json"
+        with open(filename, 'w') as f:
+            json.dump(report, f, indent=4)
+        
+        print(f"Report saved to {filename}")
+
+def main():
+    print("🌐 WiFi Network Analyzer")
+    print("------------------------")
+    
+    try:
+        monitor = WiFiMonitor()
+        
+        print("\n[1] Scanning Network...")
+        network_map = monitor.start_network_scan()
+        print(f"Discovered {len(network_map)} devices")
+        
+        print("\n[2] Capturing Network Packets...")
+        packets = monitor.packet_capture(duration=30)
+        print(f"Captured {len(packets)} packets")
+        
+        print("\n[3] Checking Network Security...")
+        security_alerts = monitor.detect_security_issues()
+        
+        print("\n[4] Generating Network Report...")
+        report = monitor.generate_network_report()
+        monitor.save_report(report)
+        
+    except Exception as e:
+        print(f"Error: {e}")
+
+if __name__ == "__main__":
+    main()
