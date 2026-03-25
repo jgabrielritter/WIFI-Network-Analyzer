@@ -3,15 +3,20 @@ from __future__ import annotations
 import queue
 import threading
 import tkinter as tk
-from tkinter import messagebox
+from pathlib import Path
+from tkinter import filedialog, messagebox
 
 from .constants import UI_POLL_INTERVAL_MS
+from .dashboard_logic import compute_scan_summary, normalize_band_badge, normalize_security_chip
 from .interfaces import annotate_with_latest, discover_interfaces, privilege_guidance
 from .models import DeviceRecord, InterfaceInfo, PacketRecord, UIEvent
 from .network_scan_service import NetworkScanService
 from .packet_capture_service import PacketCaptureService
+from .reports import export_csv, export_json, export_text_report
+from .scan_history import ScanHistoryStore
 from .security_checks import SecurityCheckService
 from .ui import AnalyzerUI
+from .wifi_models import WiFiNetworkRecord
 from .wifi_scan_service import WiFiScanService
 
 
@@ -25,11 +30,16 @@ class WiFiNetworkAnalyzerApp:
         self.event_queue: queue.Queue[UIEvent] = queue.Queue()
         self.interfaces: list[InterfaceInfo] = []
         self.last_devices: list[DeviceRecord] = []
+        self.current_networks: list[WiFiNetworkRecord] = []
+        self.current_snapshot_id: str | None = None
+        self.sort_key = "signal"
+        self.sort_desc = True
 
         self.network_scan_service = NetworkScanService()
         self.packet_capture_service = PacketCaptureService()
         self.security_service = SecurityCheckService()
         self.wifi_service = WiFiScanService()
+        self.history = ScanHistoryStore(max_entries=20)
         self.security_cancel = threading.Event()
 
         self._wire_actions()
@@ -44,6 +54,15 @@ class WiFiNetworkAnalyzerApp:
         self.ui.stop_security_button.configure(command=lambda: self.security_cancel.set())
         self.ui.refresh_interfaces_button.configure(command=self._refresh_interfaces)
         self.ui.wifi_scan_button.configure(command=self.start_wifi_scan)
+        self.ui.bind_wifi_selection(lambda _evt: self._on_wifi_selected())
+        self.ui.bind_history_selection(lambda _evt: self._on_history_selected())
+        self.ui.set_wifi_table_sort_handlers(self._sort_networks)
+
+        self.ui.export_current_json_button.configure(command=lambda: self._export(mode="current", fmt="json"))
+        self.ui.export_current_csv_button.configure(command=lambda: self._export(mode="current", fmt="csv"))
+        self.ui.export_history_json_button.configure(command=lambda: self._export(mode="history", fmt="json"))
+        self.ui.export_history_csv_button.configure(command=lambda: self._export(mode="history", fmt="csv"))
+        self.ui.export_history_txt_button.configure(command=lambda: self._export(mode="history", fmt="txt"))
 
     def _refresh_interfaces(self) -> None:
         self.interfaces = discover_interfaces()
@@ -101,6 +120,7 @@ class WiFiNetworkAnalyzerApp:
     def start_wifi_scan(self) -> None:
         self.ui.clear_wifi_networks()
         self.ui.set_wifi_scan_running(True)
+        self.ui.set_selected_network_details(None)
         self.ui.wifi_message_var.set("Scanning nearby wireless networks...")
         self.ui.status_var.set("Running Wi-Fi scan...")
 
@@ -148,6 +168,112 @@ class WiFiNetworkAnalyzerApp:
 
         threading.Thread(target=_worker, daemon=True).start()
 
+    def _render_networks(self, networks: list[WiFiNetworkRecord], view_label: str) -> None:
+        sorted_networks = self._apply_sort(networks)
+        self.ui.set_wifi_networks(sorted_networks)
+        self.ui.set_current_view_label(view_label)
+
+    def _sort_networks(self, key: str) -> None:
+        if self.sort_key == key:
+            self.sort_desc = not self.sort_desc
+        else:
+            self.sort_key = key
+            self.sort_desc = True
+        self._render_networks(self.current_networks, "Viewing: Current scan")
+
+    def _apply_sort(self, networks: list[WiFiNetworkRecord]) -> list[WiFiNetworkRecord]:
+        def key_fn(network: WiFiNetworkRecord):
+            if self.sort_key == "signal":
+                return network.rssi_dbm if network.rssi_dbm is not None else -1000
+            if self.sort_key == "channel":
+                return network.channel if network.channel is not None else 999
+            if self.sort_key == "band":
+                order = {"2.4 GHz": 1, "5 GHz": 2, "6 GHz": 3, "Unknown": 4}
+                return order.get(normalize_band_badge(network.band), 9)
+            if self.sort_key == "security":
+                order = {"Open": 0, "WEP": 1, "WPA": 2, "WPA2": 3, "WPA3": 4, "WPA2/WPA3": 5, "Unknown": 6}
+                return order.get(normalize_security_chip(network.security_mode), 9)
+            if self.sort_key == "ssid":
+                return network.display_ssid.lower()
+            if self.sort_key == "bssid":
+                return (network.bssid or "").lower()
+            if self.sort_key == "last_seen":
+                return network.scan_timestamp
+            return network.display_ssid.lower()
+
+        return sorted(networks, key=key_fn, reverse=self.sort_desc)
+
+    def _on_wifi_selected(self) -> None:
+        selected = self.ui.get_selected_wifi_network()
+        first_seen = None
+        if selected and selected.bssid:
+            history_items = self.history.list_snapshots()
+            first = None
+            for snapshot in reversed(history_items):
+                for net in snapshot.networks:
+                    if net.bssid and net.bssid == selected.bssid:
+                        first = snapshot.created_at
+                        break
+            first_seen = first
+        self.ui.set_selected_network_details(selected, first_seen=first_seen)
+
+    def _on_history_selected(self) -> None:
+        idx = self.ui.selected_history_index()
+        snapshots = self.history.list_snapshots()
+        if idx is None or idx >= len(snapshots):
+            return
+        snapshot = snapshots[idx]
+        self._render_networks(snapshot.networks, f"Viewing history snapshot: {snapshot.created_at}")
+        self.ui.wifi_message_var.set(f"History view ({snapshot.source}) with {len(snapshot.networks)} networks.")
+        self.ui.set_summary_cards(compute_scan_summary(snapshot.networks), snapshot.created_at, snapshot.interface_name)
+
+    def _export(self, mode: str, fmt: str) -> None:
+        snapshots = self.history.list_snapshots()
+        if mode == "current":
+            if not snapshots:
+                messagebox.showinfo("Export", "No current scan is available to export.")
+                return
+            snapshots = [snapshots[0]]
+
+        if not snapshots:
+            messagebox.showinfo("Export", "Scan history is empty. Run a Wi-Fi scan first.")
+            return
+
+        include_sensitive = not self.ui.redacted_export_var.get()
+        warning = (
+            "This export can include sensitive wireless metadata such as BSSID and SSID. "
+            "Only share with trusted recipients."
+            if include_sensitive
+            else "Redacted mode masks BSSID values to reduce sensitivity."
+        )
+        if not messagebox.askyesno("Sensitive Data Warning", f"{warning}\n\nProceed with export?"):
+            return
+
+        ext = {"json": ".json", "csv": ".csv", "txt": ".txt"}[fmt]
+        path = filedialog.asksaveasfilename(
+            title="Save Wi-Fi Report",
+            defaultextension=ext,
+            filetypes=[(f"{fmt.upper()} files", f"*{ext}"), ("All files", "*.*")],
+            initialfile=f"wifi_report_{mode}",
+        )
+        if not path:
+            return
+
+        try:
+            out_path = Path(path)
+            redacted = self.ui.redacted_export_var.get()
+            if fmt == "json":
+                export_json(out_path, snapshots=snapshots, redacted=redacted)
+            elif fmt == "csv":
+                export_csv(out_path, snapshots=snapshots, redacted=redacted)
+            else:
+                export_text_report(out_path, snapshots=snapshots, redacted=redacted)
+            self.ui.status_var.set(f"Export successful: {out_path.name}")
+            self.ui.wifi_message_var.set(f"Exported {len(snapshots)} snapshot(s) to {out_path.name}.")
+        except Exception as exc:
+            self.ui.status_var.set("Export failed.")
+            messagebox.showerror("Export Error", str(exc))
+
     def _poll_events(self) -> None:
         while True:
             try:
@@ -187,15 +313,28 @@ class WiFiNetworkAnalyzerApp:
             networks = result.networks
             if self.ui.hide_hidden_var.get():
                 networks = [item for item in networks if not item.is_hidden]
-            for network in networks:
-                self.ui.add_wifi_network(network)
+
+            self.current_networks = list(networks)
+            snapshot = self.history.add_result(result)
+            self.current_snapshot_id = snapshot.snapshot_id
+            self.ui.set_history_items(self.history.list_snapshots())
+            self._render_networks(self.current_networks, "Viewing: Current scan")
             self.ui.set_wifi_scan_running(False)
+
+            summary = compute_scan_summary(self.current_networks)
+            self.ui.set_summary_cards(summary, scan_time=snapshot.created_at, interface_name=result.interface_name)
+
+            compare = self.history.compare_latest()
             if result.warning:
                 self.ui.wifi_message_var.set(result.warning)
-            elif not networks:
+            elif not self.current_networks:
                 self.ui.wifi_message_var.set("No Wi-Fi networks found.")
+            elif compare:
+                self.ui.wifi_message_var.set(
+                    f"Found {len(self.current_networks)} networks via {result.source}. Δ New: {compare['new']}, Missing: {compare['missing']}."
+                )
             else:
-                self.ui.wifi_message_var.set(f"Found {len(networks)} networks via {result.source}.")
+                self.ui.wifi_message_var.set(f"Found {len(self.current_networks)} networks via {result.source}.")
             self.ui.status_var.set("Wi-Fi scan complete.")
 
 
