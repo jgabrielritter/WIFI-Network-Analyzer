@@ -81,6 +81,9 @@ class AnalyzerUI:
             "band_24": tk.StringVar(value="0"),
             "band_5": tk.StringVar(value="0"),
             "band_6": tk.StringVar(value="0"),
+            "env_score": tk.StringVar(value="N/A"),
+            "top_channel": tk.StringVar(value="N/A"),
+            "top_group": tk.StringVar(value="N/A"),
             "scan_time": tk.StringVar(value="N/A"),
             "interface": tk.StringVar(value="N/A"),
         }
@@ -91,6 +94,9 @@ class AnalyzerUI:
             ("2.4 GHz", "band_24"),
             ("5 GHz", "band_5"),
             ("6 GHz", "band_6"),
+            ("Env Score", "env_score"),
+            ("Crowded CH", "top_channel"),
+            ("Top SSID Group", "top_group"),
             ("Scan Time", "scan_time"),
             ("Interface", "interface"),
         ]
@@ -147,12 +153,15 @@ class AnalyzerUI:
         details = ttk.LabelFrame(side_panel, text="Selected Network Details")
         details.grid(row=0, column=0, sticky="nsew", pady=(0, 6))
         self.detail_vars = {k: tk.StringVar(value="N/A") for k in [
-            "ssid", "hidden", "bssid", "signal", "quality", "channel", "frequency", "band", "security", "interface", "first_seen", "last_seen", "notes"
+            "ssid", "hidden", "bssid", "signal", "quality", "channel", "frequency", "band", "security", "interface", "first_seen", "last_seen",
+            "group_rank", "strongest_in_group", "channel_congestion", "notes"
         ]}
         rows = [
             ("SSID", "ssid"), ("Hidden", "hidden"), ("BSSID", "bssid"), ("Signal", "signal"), ("Quality", "quality"),
             ("Channel", "channel"), ("Frequency", "frequency"), ("Band", "band"), ("Security", "security"),
-            ("Interface", "interface"), ("First Seen", "first_seen"), ("Last Seen", "last_seen"), ("Notes", "notes"),
+            ("Interface", "interface"), ("First Seen", "first_seen"), ("Last Seen", "last_seen"),
+            ("SSID Rank", "group_rank"), ("Strongest AP", "strongest_in_group"), ("Channel Crowd", "channel_congestion"),
+            ("Notes", "notes"),
         ]
         for i, (label, key) in enumerate(rows):
             ttk.Label(details, text=f"{label}:", foreground="#666").grid(row=i, column=0, sticky="nw", padx=6, pady=2)
@@ -163,6 +172,8 @@ class AnalyzerUI:
         ttk.Label(history, text="Session-only history. Not auto-saved to disk.", foreground="#666").pack(anchor="w", padx=6, pady=(4, 0))
         self.history_listbox = tk.Listbox(history, height=8)
         self.history_listbox.pack(expand=True, fill="both", padx=6, pady=6)
+        self.analytics_insights = tk.Text(history, wrap="word", height=6)
+        self.analytics_insights.pack(fill="x", padx=6, pady=(0, 6))
 
     def _build_devices_tab(self) -> None:
         self.devices_frame = ttk.Frame(self.notebook)
@@ -296,7 +307,14 @@ class AnalyzerUI:
     def bind_wifi_selection(self, callback: callable) -> None:
         self.wifi_table.bind("<<TreeviewSelect>>", callback)
 
-    def set_selected_network_details(self, network: WiFiNetworkRecord | None, first_seen: str | None = None) -> None:
+    def set_selected_network_details(
+        self,
+        network: WiFiNetworkRecord | None,
+        first_seen: str | None = None,
+        group_rank: int | None = None,
+        strongest_in_group: bool | None = None,
+        channel_congestion: str | None = None,
+    ) -> None:
         if network is None:
             for var in self.detail_vars.values():
                 var.set("N/A")
@@ -313,6 +331,12 @@ class AnalyzerUI:
         self.detail_vars["interface"].set(network.interface_name or "Unknown")
         self.detail_vars["first_seen"].set(first_seen or network.scan_timestamp)
         self.detail_vars["last_seen"].set(network.scan_timestamp)
+        self.detail_vars["group_rank"].set(str(group_rank) if group_rank is not None else "N/A")
+        if strongest_in_group is None:
+            self.detail_vars["strongest_in_group"].set("N/A")
+        else:
+            self.detail_vars["strongest_in_group"].set("Yes" if strongest_in_group else "No")
+        self.detail_vars["channel_congestion"].set(channel_congestion or "N/A")
         self.detail_vars["notes"].set(
             "Some fields depend on OS scanner support. Unknown values are reported as-is."
         )
@@ -371,3 +395,8 @@ class AnalyzerUI:
 
     def set_wifi_scan_running(self, running: bool) -> None:
         self.wifi_scan_button.configure(state="disabled" if running else "normal")
+
+    def set_analytics_insights(self, lines: list[str]) -> None:
+        self.analytics_insights.delete("1.0", tk.END)
+        for line in lines:
+            self.analytics_insights.insert(tk.END, f"- {line}\n")
