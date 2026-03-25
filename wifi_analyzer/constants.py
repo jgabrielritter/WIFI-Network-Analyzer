@@ -1,7 +1,7 @@
 """Centralized configuration and static labels for the LAN analyzer."""
 
-APP_TITLE = "WiFi Network Analyzer (LAN Features)"
-APP_SIZE = "900x680"
+APP_TITLE = "WiFi Network Analyzer Dashboard"
+APP_SIZE = "1220x760"
 
 UI_POLL_INTERVAL_MS = 120
 MAX_PACKET_LINES = 1500
