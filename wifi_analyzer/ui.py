@@ -21,6 +21,11 @@ class AnalyzerUI:
         self.progress_var = tk.StringVar(value="")
         self.wifi_message_var = tk.StringVar(value="Run a scan to view nearby wireless networks.")
         self.current_view_label_var = tk.StringVar(value="Viewing: Current scan")
+        self.comparison_target_ssid_var = tk.StringVar(value="")
+        self.scan_label_var = tk.StringVar(value="")
+        self.room_name_var = tk.StringVar(value="")
+        self.location_name_var = tk.StringVar(value="")
+        self.time_of_day_var = tk.StringVar(value="")
 
         self._wifi_table_rows: dict[str, WiFiNetworkRecord] = {}
 
@@ -71,6 +76,12 @@ class AnalyzerUI:
         self.export_history_csv_button.pack(side="right", padx=4)
         self.export_history_txt_button = ttk.Button(top_controls, text="Export Text Report")
         self.export_history_txt_button.pack(side="right", padx=4)
+        self.export_comparison_json_button = ttk.Button(top_controls, text="Export Comparison JSON")
+        self.export_comparison_json_button.pack(side="right", padx=4)
+        self.export_comparison_csv_button = ttk.Button(top_controls, text="Export Comparison CSV")
+        self.export_comparison_csv_button.pack(side="right", padx=4)
+        self.export_comparison_txt_button = ttk.Button(top_controls, text="Export Comparison TXT")
+        self.export_comparison_txt_button.pack(side="right", padx=4)
 
         summary_frame = ttk.LabelFrame(self.wifi_frame, text="Current Scan Summary")
         summary_frame.pack(fill="x", padx=4, pady=4)
@@ -170,10 +181,34 @@ class AnalyzerUI:
         history = ttk.LabelFrame(side_panel, text="Scan History (Session)")
         history.grid(row=1, column=0, sticky="nsew")
         ttk.Label(history, text="Session-only history. Not auto-saved to disk.", foreground="#666").pack(anchor="w", padx=6, pady=(4, 0))
-        self.history_listbox = tk.Listbox(history, height=8)
+
+        context_editor = ttk.Frame(history)
+        context_editor.pack(fill="x", padx=6, pady=(4, 2))
+        for idx, (label, var) in enumerate([
+            ("Label", self.scan_label_var),
+            ("Room", self.room_name_var),
+            ("Location", self.location_name_var),
+            ("Time", self.time_of_day_var),
+        ]):
+            ttk.Label(context_editor, text=label, foreground="#666").grid(row=idx, column=0, sticky="w", padx=(0, 4), pady=1)
+            ttk.Entry(context_editor, textvariable=var).grid(row=idx, column=1, sticky="ew", pady=1)
+        context_editor.columnconfigure(1, weight=1)
+        self.save_context_button = ttk.Button(context_editor, text="Save Label Context")
+        self.save_context_button.grid(row=0, column=2, rowspan=2, padx=(6, 0), sticky="nsew")
+
+        compare_bar = ttk.Frame(history)
+        compare_bar.pack(fill="x", padx=6, pady=(2, 2))
+        ttk.Label(compare_bar, text="SSID focus:").pack(side="left")
+        ttk.Entry(compare_bar, textvariable=self.comparison_target_ssid_var, width=18).pack(side="left", padx=(4, 8))
+        self.compare_selected_button = ttk.Button(compare_bar, text="Compare Selected 2")
+        self.compare_selected_button.pack(side="left")
+
+        self.history_listbox = tk.Listbox(history, height=8, selectmode=tk.EXTENDED)
         self.history_listbox.pack(expand=True, fill="both", padx=6, pady=6)
         self.analytics_insights = tk.Text(history, wrap="word", height=6)
         self.analytics_insights.pack(fill="x", padx=6, pady=(0, 6))
+        self.comparison_insights = tk.Text(history, wrap="word", height=8)
+        self.comparison_insights.pack(fill="x", padx=6, pady=(0, 6))
 
     def _build_devices_tab(self) -> None:
         self.devices_frame = ttk.Frame(self.notebook)
@@ -354,14 +389,41 @@ class AnalyzerUI:
     def set_history_items(self, snapshots: list[ScanSnapshot]) -> None:
         self.history_listbox.delete(0, tk.END)
         for item in snapshots:
-            self.history_listbox.insert(tk.END, f"{item.created_at} | {len(item.networks)} networks | {item.source}")
+            self.history_listbox.insert(tk.END, f"{item.created_at} | {len(item.networks)} networks | {item.context.to_display_label()}")
 
     def bind_history_selection(self, callback: callable) -> None:
         self.history_listbox.bind("<<ListboxSelect>>", callback)
 
+    def bind_save_context(self, callback: callable) -> None:
+        self.save_context_button.configure(command=callback)
+
+    def bind_compare_selected(self, callback: callable) -> None:
+        self.compare_selected_button.configure(command=callback)
+
     def selected_history_index(self) -> int | None:
         selected = self.history_listbox.curselection()
         return selected[0] if selected else None
+
+    def selected_history_indices(self) -> list[int]:
+        return list(self.history_listbox.curselection())
+
+    def get_context_inputs(self) -> dict[str, str]:
+        return {
+            "scan_label": self.scan_label_var.get().strip(),
+            "room_name": self.room_name_var.get().strip(),
+            "location_name": self.location_name_var.get().strip(),
+            "time_of_day_label": self.time_of_day_var.get().strip(),
+        }
+
+    def set_context_inputs(self, context: dict[str, str | None]) -> None:
+        self.scan_label_var.set(context.get("scan_label") or "")
+        self.room_name_var.set(context.get("room_name") or "")
+        self.location_name_var.set(context.get("location_name") or "")
+        self.time_of_day_var.set(context.get("time_of_day_label") or "")
+
+    def comparison_target_ssid(self) -> str | None:
+        value = self.comparison_target_ssid_var.get().strip()
+        return value or None
 
     def add_device(self, device: DeviceRecord, redact: bool = True) -> None:
         ip = mask_ip(device.ip) if redact else device.ip
@@ -400,3 +462,8 @@ class AnalyzerUI:
         self.analytics_insights.delete("1.0", tk.END)
         for line in lines:
             self.analytics_insights.insert(tk.END, f"- {line}\n")
+
+    def set_comparison_insights(self, lines: list[str]) -> None:
+        self.comparison_insights.delete("1.0", tk.END)
+        for line in lines:
+            self.comparison_insights.insert(tk.END, f"{line}\n")
