@@ -16,6 +16,7 @@ from .reports import export_csv, export_json, export_text_report
 from .scan_history import ScanHistoryStore
 from .security_checks import SecurityCheckService
 from .ui import AnalyzerUI
+from .wifi_analytics import WiFiAnalyticsEngine, WiFiAnalyticsReport, group_key_for_network
 from .wifi_models import WiFiNetworkRecord
 from .wifi_scan_service import WiFiScanService
 
@@ -32,6 +33,7 @@ class WiFiNetworkAnalyzerApp:
         self.last_devices: list[DeviceRecord] = []
         self.current_networks: list[WiFiNetworkRecord] = []
         self.current_snapshot_id: str | None = None
+        self.current_analytics: WiFiAnalyticsReport | None = None
         self.sort_key = "signal"
         self.sort_desc = True
 
@@ -40,6 +42,7 @@ class WiFiNetworkAnalyzerApp:
         self.security_service = SecurityCheckService()
         self.wifi_service = WiFiScanService()
         self.history = ScanHistoryStore(max_entries=20)
+        self.analytics_engine = WiFiAnalyticsEngine()
         self.security_cancel = threading.Event()
 
         self._wire_actions()
@@ -206,6 +209,10 @@ class WiFiNetworkAnalyzerApp:
     def _on_wifi_selected(self) -> None:
         selected = self.ui.get_selected_wifi_network()
         first_seen = None
+        group_rank = None
+        strongest_in_group = None
+        channel_congestion = None
+
         if selected and selected.bssid:
             history_items = self.history.list_snapshots()
             first = None
@@ -215,7 +222,26 @@ class WiFiNetworkAnalyzerApp:
                         first = snapshot.created_at
                         break
             first_seen = first
-        self.ui.set_selected_network_details(selected, first_seen=first_seen)
+
+        if selected and self.current_analytics:
+            if selected.bssid:
+                group_rank = self.current_analytics.network_rank_by_bssid.get(selected.bssid)
+            group_key = group_key_for_network(selected, self.analytics_engine.config.hidden_ssid_group_name)
+            strongest = self.current_analytics.strongest_bssid_by_group.get(group_key)
+            strongest_in_group = (strongest == selected.bssid) if selected.bssid and strongest else False
+            if selected.channel is not None:
+                for channel in self.current_analytics.channel_congestion:
+                    if channel.channel == selected.channel and channel.band == normalize_band_badge(selected.band):
+                        channel_congestion = f"{channel.label} ({channel.network_count} observed)"
+                        break
+
+        self.ui.set_selected_network_details(
+            selected,
+            first_seen=first_seen,
+            group_rank=group_rank,
+            strongest_in_group=strongest_in_group,
+            channel_congestion=channel_congestion,
+        )
 
     def _on_history_selected(self) -> None:
         idx = self.ui.selected_history_index()
@@ -226,6 +252,8 @@ class WiFiNetworkAnalyzerApp:
         self._render_networks(snapshot.networks, f"Viewing history snapshot: {snapshot.created_at}")
         self.ui.wifi_message_var.set(f"History view ({snapshot.source}) with {len(snapshot.networks)} networks.")
         self.ui.set_summary_cards(compute_scan_summary(snapshot.networks), snapshot.created_at, snapshot.interface_name)
+        self.current_analytics = self.analytics_engine.build_report(snapshot.networks)
+        self._render_analytics_summary(self.current_analytics)
 
     def _export(self, mode: str, fmt: str) -> None:
         snapshots = self.history.list_snapshots()
@@ -323,6 +351,14 @@ class WiFiNetworkAnalyzerApp:
 
             summary = compute_scan_summary(self.current_networks)
             self.ui.set_summary_cards(summary, scan_time=snapshot.created_at, interface_name=result.interface_name)
+            snapshots = self.history.list_snapshots()
+            previous = snapshots[1] if len(snapshots) > 1 else None
+            self.current_analytics = self.analytics_engine.build_report(
+                self.current_networks,
+                latest_snapshot=snapshot,
+                previous_snapshot=previous,
+            )
+            self._render_analytics_summary(self.current_analytics)
 
             compare = self.history.compare_latest()
             if result.warning:
@@ -336,6 +372,18 @@ class WiFiNetworkAnalyzerApp:
             else:
                 self.ui.wifi_message_var.set(f"Found {len(self.current_networks)} networks via {result.source}.")
             self.ui.status_var.set("Wi-Fi scan complete.")
+
+    def _render_analytics_summary(self, analytics: WiFiAnalyticsReport) -> None:
+        top_channel = analytics.channel_congestion[0] if analytics.channel_congestion else None
+        top_group = analytics.groups[0] if analytics.groups else None
+        self.ui.summary_vars["env_score"].set(f"{analytics.environment.score} ({analytics.environment.label})")
+        self.ui.summary_vars["top_channel"].set(
+            f"CH {top_channel.channel} {top_channel.band} ({top_channel.label})" if top_channel else "N/A"
+        )
+        self.ui.summary_vars["top_group"].set(
+            f"{top_group.ssid_display} ({top_group.access_point_count} APs)" if top_group else "N/A"
+        )
+        self.ui.set_analytics_insights(analytics.insights[:6])
 
 
 def main() -> None:
