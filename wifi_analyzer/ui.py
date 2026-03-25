@@ -82,6 +82,12 @@ class AnalyzerUI:
         self.export_comparison_csv_button.pack(side="right", padx=4)
         self.export_comparison_txt_button = ttk.Button(top_controls, text="Export Comparison TXT")
         self.export_comparison_txt_button.pack(side="right", padx=4)
+        self.export_optimization_json_button = ttk.Button(top_controls, text="Export Optimization JSON")
+        self.export_optimization_json_button.pack(side="right", padx=4)
+        self.export_optimization_csv_button = ttk.Button(top_controls, text="Export Optimization CSV")
+        self.export_optimization_csv_button.pack(side="right", padx=4)
+        self.export_optimization_txt_button = ttk.Button(top_controls, text="Export Optimization TXT")
+        self.export_optimization_txt_button.pack(side="right", padx=4)
 
         summary_frame = ttk.LabelFrame(self.wifi_frame, text="Current Scan Summary")
         summary_frame.pack(fill="x", padx=4, pady=4)
@@ -209,6 +215,19 @@ class AnalyzerUI:
         self.analytics_insights.pack(fill="x", padx=6, pady=(0, 6))
         self.comparison_insights = tk.Text(history, wrap="word", height=8)
         self.comparison_insights.pack(fill="x", padx=6, pady=(0, 6))
+
+        optimization = ttk.LabelFrame(side_panel, text="Guided Optimization")
+        optimization.grid(row=2, column=0, sticky="nsew", pady=(6, 0))
+        side_panel.rowconfigure(2, weight=1)
+        controls = ttk.Frame(optimization)
+        controls.pack(fill="x", padx=6, pady=(4, 2))
+        ttk.Label(controls, text="Target SSID:").pack(side="left")
+        self.optimization_target_ssid_var = tk.StringVar(value="")
+        ttk.Entry(controls, textvariable=self.optimization_target_ssid_var, width=18).pack(side="left", padx=(4, 8))
+        self.run_optimization_button = ttk.Button(controls, text="Run Optimization")
+        self.run_optimization_button.pack(side="left")
+        self.optimization_summary_text = tk.Text(optimization, wrap="word", height=10)
+        self.optimization_summary_text.pack(fill="x", padx=6, pady=(2, 6))
 
     def _build_devices_tab(self) -> None:
         self.devices_frame = ttk.Frame(self.notebook)
@@ -425,6 +444,13 @@ class AnalyzerUI:
         value = self.comparison_target_ssid_var.get().strip()
         return value or None
 
+    def optimization_target_ssid(self) -> str | None:
+        value = self.optimization_target_ssid_var.get().strip()
+        return value or None
+
+    def bind_run_optimization(self, callback: callable) -> None:
+        self.run_optimization_button.configure(command=callback)
+
     def add_device(self, device: DeviceRecord, redact: bool = True) -> None:
         ip = mask_ip(device.ip) if redact else device.ip
         mac = mask_mac(device.mac) if redact else device.mac
@@ -467,3 +493,8 @@ class AnalyzerUI:
         self.comparison_insights.delete("1.0", tk.END)
         for line in lines:
             self.comparison_insights.insert(tk.END, f"{line}\n")
+
+    def set_optimization_summary(self, lines: list[str]) -> None:
+        self.optimization_summary_text.delete("1.0", tk.END)
+        for line in lines:
+            self.optimization_summary_text.insert(tk.END, f"{line}\n")
