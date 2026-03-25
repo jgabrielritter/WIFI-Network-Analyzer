@@ -12,12 +12,22 @@ from .interfaces import annotate_with_latest, discover_interfaces, privilege_gui
 from .models import DeviceRecord, InterfaceInfo, PacketRecord, UIEvent
 from .network_scan_service import NetworkScanService
 from .packet_capture_service import PacketCaptureService
-from .reports import export_csv, export_json, export_text_report
-from .scan_history import ScanHistoryStore
+from .reports import (
+    export_comparison_csv,
+    export_comparison_json,
+    export_comparison_text,
+    export_csv,
+    export_json,
+    export_text_report,
+)
+from .scan_history import ScanContext, ScanHistoryStore
 from .security_checks import SecurityCheckService
 from .ui import AnalyzerUI
 from .wifi_analytics import WiFiAnalyticsEngine, WiFiAnalyticsReport, group_key_for_network
 from .wifi_models import WiFiNetworkRecord
+from .scan_comparison import compare_snapshots
+from .trend_analysis import build_environment_score_trend
+from .troubleshooting_engine import build_troubleshooting_summary
 from .wifi_scan_service import WiFiScanService
 
 
@@ -59,6 +69,8 @@ class WiFiNetworkAnalyzerApp:
         self.ui.wifi_scan_button.configure(command=self.start_wifi_scan)
         self.ui.bind_wifi_selection(lambda _evt: self._on_wifi_selected())
         self.ui.bind_history_selection(lambda _evt: self._on_history_selected())
+        self.ui.bind_save_context(self._save_selected_context)
+        self.ui.bind_compare_selected(self._compare_selected_snapshots)
         self.ui.set_wifi_table_sort_handlers(self._sort_networks)
 
         self.ui.export_current_json_button.configure(command=lambda: self._export(mode="current", fmt="json"))
@@ -66,6 +78,9 @@ class WiFiNetworkAnalyzerApp:
         self.ui.export_history_json_button.configure(command=lambda: self._export(mode="history", fmt="json"))
         self.ui.export_history_csv_button.configure(command=lambda: self._export(mode="history", fmt="csv"))
         self.ui.export_history_txt_button.configure(command=lambda: self._export(mode="history", fmt="txt"))
+        self.ui.export_comparison_json_button.configure(command=lambda: self._export(mode="comparison", fmt="json"))
+        self.ui.export_comparison_csv_button.configure(command=lambda: self._export(mode="comparison", fmt="csv"))
+        self.ui.export_comparison_txt_button.configure(command=lambda: self._export(mode="comparison", fmt="txt"))
 
     def _refresh_interfaces(self) -> None:
         self.interfaces = discover_interfaces()
@@ -249,14 +264,100 @@ class WiFiNetworkAnalyzerApp:
         if idx is None or idx >= len(snapshots):
             return
         snapshot = snapshots[idx]
-        self._render_networks(snapshot.networks, f"Viewing history snapshot: {snapshot.created_at}")
+        self.ui.set_context_inputs(snapshot.context.to_dict())
+        self._render_networks(snapshot.networks, f"Viewing history snapshot: {snapshot.context.to_display_label()} | {snapshot.created_at}")
         self.ui.wifi_message_var.set(f"History view ({snapshot.source}) with {len(snapshot.networks)} networks.")
         self.ui.set_summary_cards(compute_scan_summary(snapshot.networks), snapshot.created_at, snapshot.interface_name)
         self.current_analytics = self.analytics_engine.build_report(snapshot.networks)
         self._render_analytics_summary(self.current_analytics)
 
+
+    def _save_selected_context(self) -> None:
+        idx = self.ui.selected_history_index()
+        snapshots = self.history.list_snapshots()
+        if idx is None or idx >= len(snapshots):
+            messagebox.showinfo("Save Label Context", "Select a scan history entry first.")
+            return
+
+        source_snapshot = snapshots[idx]
+        inputs = self.ui.get_context_inputs()
+        context = ScanContext(
+            scan_label=inputs.get("scan_label") or None,
+            room_name=inputs.get("room_name") or None,
+            location_name=inputs.get("location_name") or None,
+            time_of_day_label=inputs.get("time_of_day_label") or None,
+        )
+        updated = self.history.update_context(source_snapshot.snapshot_id, context=context)
+        if not updated:
+            messagebox.showerror("Save Label Context", "Unable to update selected snapshot context.")
+            return
+        self.ui.set_history_items(self.history.list_snapshots())
+        self.ui.status_var.set("Scan labeling context saved.")
+
+    def _compare_selected_snapshots(self) -> None:
+        idxs = self.ui.selected_history_indices()
+        if len(idxs) < 2:
+            messagebox.showinfo("Compare Snapshots", "Select exactly two history scans to compare.")
+            return
+        left_i, right_i = idxs[0], idxs[1]
+        snapshots = self.history.list_snapshots()
+        if max(left_i, right_i) >= len(snapshots):
+            return
+
+        left = snapshots[left_i]
+        right = snapshots[right_i]
+        target_ssid = self.ui.comparison_target_ssid()
+        comparison = compare_snapshots(left, right, target_ssid=target_ssid)
+        troubleshooting = build_troubleshooting_summary(comparison, target_ssid=target_ssid)
+
+        env_trend = build_environment_score_trend([left, right])
+        trend_line = f"Trend: {env_trend[0][1]} -> {env_trend[1][1]} ({env_trend[0][2]} -> {env_trend[1][2]})"
+        lines = [
+            f"Compared '{comparison.left.scan_label}' vs '{comparison.right.scan_label}'",
+            f"Deltas: {comparison.deltas}",
+        ]
+        if comparison.findings:
+            lines.append("Findings:")
+            lines.extend([f"- {item}" for item in comparison.findings])
+        lines.append(trend_line)
+        lines.append("Troubleshooting:")
+        lines.extend(troubleshooting)
+        self.ui.set_comparison_insights(lines)
+
+        self.ui.wifi_message_var.set(
+            f"Comparison ready for '{comparison.left.scan_label}' vs '{comparison.right.scan_label}' (heuristic scan analysis)."
+        )
+
+    def _export_comparison(self, left: ScanSnapshot, right: ScanSnapshot, fmt: str, target_ssid: str | None) -> None:
+        ext = {"json": ".json", "csv": ".csv", "txt": ".txt"}[fmt]
+        path = filedialog.asksaveasfilename(
+            title="Save Wi-Fi Comparison",
+            defaultextension=ext,
+            filetypes=[(f"{fmt.upper()} files", f"*{ext}"), ("All files", "*.*")],
+            initialfile="wifi_comparison_report",
+        )
+        if not path:
+            return
+
+        out_path = Path(path)
+        if fmt == "json":
+            export_comparison_json(out_path, left=left, right=right, target_ssid=target_ssid)
+        elif fmt == "csv":
+            export_comparison_csv(out_path, left=left, right=right, target_ssid=target_ssid)
+        else:
+            export_comparison_text(out_path, left=left, right=right, target_ssid=target_ssid)
+
     def _export(self, mode: str, fmt: str) -> None:
         snapshots = self.history.list_snapshots()
+        if mode == "comparison":
+            idxs = self.ui.selected_history_indices()
+            if len(idxs) < 2:
+                messagebox.showinfo("Export", "Select two history scans to export a comparison.")
+                return
+            left, right = snapshots[idxs[0]], snapshots[idxs[1]]
+            self._export_comparison(left=left, right=right, fmt=fmt, target_ssid=self.ui.comparison_target_ssid())
+            self.ui.status_var.set("Comparison export successful.")
+            return
         if mode == "current":
             if not snapshots:
                 messagebox.showinfo("Export", "No current scan is available to export.")

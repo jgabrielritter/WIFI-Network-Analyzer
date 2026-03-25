@@ -8,6 +8,8 @@ from pathlib import Path
 from .dashboard_logic import format_signal_bars, normalize_band_badge, security_chip_presentation
 from .privacy import mask_mac
 from .scan_history import ScanSnapshot
+from .scan_comparison import compare_snapshots
+from .troubleshooting_engine import build_troubleshooting_summary
 from .wifi_analytics import WiFiAnalyticsEngine, WiFiAnalyticsReport, group_key_for_network
 from .wifi_models import WiFiNetworkRecord
 
@@ -99,6 +101,7 @@ def _build_snapshot_payload(snapshot: ScanSnapshot, redacted: bool, engine: WiFi
             },
             "insights": analytics.insights,
         },
+        "context": snapshot.context.to_dict(),
         "networks": [
             _network_to_dict(network, redacted=redacted, analytics=analytics, hidden_group_name=hidden_group_name)
             for network in snapshot.networks
@@ -219,4 +222,72 @@ def export_text_report(path: Path, snapshots: list[ScanSnapshot], redacted: bool
             )
         lines.append("")
 
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def build_comparison_payload(
+    left: ScanSnapshot,
+    right: ScanSnapshot,
+    target_ssid: str | None = None,
+) -> dict[str, object]:
+    comparison = compare_snapshots(left, right, target_ssid=target_ssid)
+    troubleshooting = build_troubleshooting_summary(comparison, target_ssid=target_ssid)
+    return {
+        "left_snapshot_id": left.snapshot_id,
+        "right_snapshot_id": right.snapshot_id,
+        "left_label": left.context.to_display_label(),
+        "right_label": right.context.to_display_label(),
+        "target_ssid": target_ssid,
+        "deltas": comparison.deltas,
+        "ssid_delta": comparison.ssid_delta,
+        "channel_delta": comparison.channel_delta,
+        "findings": comparison.findings,
+        "troubleshooting": troubleshooting,
+        "disclaimer": comparison.disclaimer,
+    }
+
+
+def export_comparison_json(path: Path, left: ScanSnapshot, right: ScanSnapshot, target_ssid: str | None = None) -> None:
+    payload = build_comparison_payload(left=left, right=right, target_ssid=target_ssid)
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def export_comparison_csv(path: Path, left: ScanSnapshot, right: ScanSnapshot, target_ssid: str | None = None) -> None:
+    payload = build_comparison_payload(left=left, right=right, target_ssid=target_ssid)
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=["left_label", "right_label", "metric", "value", "note"],
+        )
+        writer.writeheader()
+        for key, value in payload["deltas"].items():
+            writer.writerow({"left_label": payload["left_label"], "right_label": payload["right_label"], "metric": key, "value": value, "note": ""})
+        for key, value in payload["ssid_delta"].items():
+            writer.writerow({"left_label": payload["left_label"], "right_label": payload["right_label"], "metric": f"ssid_{key}", "value": value, "note": payload.get("target_ssid") or ""})
+        for line in payload["troubleshooting"]:
+            writer.writerow({"left_label": payload["left_label"], "right_label": payload["right_label"], "metric": "troubleshooting", "value": "", "note": line})
+
+
+def export_comparison_text(path: Path, left: ScanSnapshot, right: ScanSnapshot, target_ssid: str | None = None) -> None:
+    payload = build_comparison_payload(left=left, right=right, target_ssid=target_ssid)
+    lines = [
+        "WiFi Network Analyzer Comparison Report",
+        f"Left: {payload['left_label']} ({left.created_at})",
+        f"Right: {payload['right_label']} ({right.created_at})",
+        f"Target SSID: {target_ssid or 'N/A'}",
+        "",
+        "Deltas:",
+    ]
+    for key, value in payload["deltas"].items():
+        lines.append(f"- {key}: {value}")
+    lines.append("")
+    lines.append("Findings:")
+    for item in payload["findings"] or ["No notable differences detected from current thresholds."]:
+        lines.append(f"- {item}")
+    lines.append("")
+    lines.append("Troubleshooting suggestions:")
+    for item in payload["troubleshooting"]:
+        lines.append(item)
+    lines.append("")
+    lines.append(f"Disclaimer: {payload['disclaimer']}")
     path.write_text("\n".join(lines), encoding="utf-8")
