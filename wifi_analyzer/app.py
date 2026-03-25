@@ -13,11 +13,15 @@ from .models import DeviceRecord, InterfaceInfo, PacketRecord, UIEvent
 from .network_scan_service import NetworkScanService
 from .packet_capture_service import PacketCaptureService
 from .reports import (
+    build_optimization_payload,
     export_comparison_csv,
     export_comparison_json,
     export_comparison_text,
     export_csv,
     export_json,
+    export_optimization_csv,
+    export_optimization_json,
+    export_optimization_text,
     export_text_report,
 )
 from .scan_history import ScanContext, ScanHistoryStore
@@ -54,6 +58,7 @@ class WiFiNetworkAnalyzerApp:
         self.history = ScanHistoryStore(max_entries=20)
         self.analytics_engine = WiFiAnalyticsEngine()
         self.security_cancel = threading.Event()
+        self.latest_optimization_payload: dict[str, object] | None = None
 
         self._wire_actions()
         self._refresh_interfaces()
@@ -81,6 +86,10 @@ class WiFiNetworkAnalyzerApp:
         self.ui.export_comparison_json_button.configure(command=lambda: self._export(mode="comparison", fmt="json"))
         self.ui.export_comparison_csv_button.configure(command=lambda: self._export(mode="comparison", fmt="csv"))
         self.ui.export_comparison_txt_button.configure(command=lambda: self._export(mode="comparison", fmt="txt"))
+        self.ui.export_optimization_json_button.configure(command=lambda: self._export(mode="optimization", fmt="json"))
+        self.ui.export_optimization_csv_button.configure(command=lambda: self._export(mode="optimization", fmt="csv"))
+        self.ui.export_optimization_txt_button.configure(command=lambda: self._export(mode="optimization", fmt="txt"))
+        self.ui.bind_run_optimization(self._run_optimization_guidance)
 
     def _refresh_interfaces(self) -> None:
         self.interfaces = discover_interfaces()
@@ -349,6 +358,17 @@ class WiFiNetworkAnalyzerApp:
 
     def _export(self, mode: str, fmt: str) -> None:
         snapshots = self.history.list_snapshots()
+        if mode == "optimization":
+            target_ssid = self.ui.optimization_target_ssid() or self.ui.comparison_target_ssid()
+            if not target_ssid:
+                messagebox.showinfo("Export", "Enter a target SSID for optimization exports.")
+                return
+            if not snapshots:
+                messagebox.showinfo("Export", "Scan history is empty. Run a Wi-Fi scan first.")
+                return
+            self._export_optimization(snapshots=snapshots, fmt=fmt, target_ssid=target_ssid)
+            self.ui.status_var.set("Optimization export successful.")
+            return
         if mode == "comparison":
             idxs = self.ui.selected_history_indices()
             if len(idxs) < 2:
@@ -402,6 +422,55 @@ class WiFiNetworkAnalyzerApp:
         except Exception as exc:
             self.ui.status_var.set("Export failed.")
             messagebox.showerror("Export Error", str(exc))
+
+    def _export_optimization(self, snapshots: list[ScanSnapshot], fmt: str, target_ssid: str) -> None:
+        ext = {"json": ".json", "csv": ".csv", "txt": ".txt"}[fmt]
+        path = filedialog.asksaveasfilename(
+            title="Save Wi-Fi Optimization Plan",
+            defaultextension=ext,
+            filetypes=[(f"{fmt.upper()} files", f"*{ext}"), ("All files", "*.*")],
+            initialfile="wifi_optimization_plan",
+        )
+        if not path:
+            return
+        out_path = Path(path)
+        if fmt == "json":
+            export_optimization_json(out_path, snapshots=snapshots, target_ssid=target_ssid)
+        elif fmt == "csv":
+            export_optimization_csv(out_path, snapshots=snapshots, target_ssid=target_ssid)
+        else:
+            export_optimization_text(out_path, snapshots=snapshots, target_ssid=target_ssid)
+
+    def _run_optimization_guidance(self) -> None:
+        snapshots = self.history.list_snapshots()
+        target_ssid = self.ui.optimization_target_ssid() or self.ui.comparison_target_ssid()
+        if not target_ssid:
+            messagebox.showinfo("Guided Optimization", "Enter the target SSID to optimize.")
+            return
+        if not snapshots:
+            messagebox.showinfo("Guided Optimization", "Run and label scans across rooms before optimization.")
+            return
+        try:
+            payload = build_optimization_payload(snapshots=snapshots, target_ssid=target_ssid)
+            self.latest_optimization_payload = payload
+            optimization = payload["optimization"]  # type: ignore[index]
+            lines = [
+                f"Target SSID: {payload['target_ssid']}",
+                f"Confidence: {optimization['confidence_label']}",
+                "",
+                "Optimization summary:",
+            ]
+            lines.extend([f"- {item}" for item in optimization["summary_lines"]])
+            lines.append("")
+            lines.append("Priority rooms:")
+            for item in optimization["improvement_plan"][:3]:
+                lines.append(f"{item['priority_rank']}. {item['room_name']} [{item['priority_level']}] - {item['observed_issue']}")
+            lines.append("")
+            lines.append(f"Disclaimer: {payload['disclaimer']}")
+            self.ui.set_optimization_summary(lines)
+            self.ui.wifi_message_var.set(f"Optimization plan prepared for {target_ssid} across {payload['room_count']} room group(s).")
+        except Exception as exc:
+            messagebox.showerror("Guided Optimization", str(exc))
 
     def _poll_events(self) -> None:
         while True:

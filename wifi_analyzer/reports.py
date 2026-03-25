@@ -12,6 +12,7 @@ from .scan_comparison import compare_snapshots
 from .troubleshooting_engine import build_troubleshooting_summary
 from .wifi_analytics import WiFiAnalyticsEngine, WiFiAnalyticsReport, group_key_for_network
 from .wifi_models import WiFiNetworkRecord
+from .optimization_engine import OptimizationEngine, optimization_result_to_dict
 
 
 def _network_to_dict(
@@ -288,6 +289,104 @@ def export_comparison_text(path: Path, left: ScanSnapshot, right: ScanSnapshot, 
     lines.append("Troubleshooting suggestions:")
     for item in payload["troubleshooting"]:
         lines.append(item)
+    lines.append("")
+    lines.append(f"Disclaimer: {payload['disclaimer']}")
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def build_optimization_payload(snapshots: list[ScanSnapshot], target_ssid: str) -> dict[str, object]:
+    engine = OptimizationEngine()
+    result = engine.build_guidance(snapshots=snapshots, target_ssid=target_ssid)
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "target_ssid": target_ssid,
+        "snapshot_count": len(snapshots),
+        "room_count": len(result.room_summaries),
+        "optimization": optimization_result_to_dict(result),
+        "disclaimer": result.disclaimer,
+    }
+
+
+def export_optimization_json(path: Path, snapshots: list[ScanSnapshot], target_ssid: str) -> None:
+    payload = build_optimization_payload(snapshots=snapshots, target_ssid=target_ssid)
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def export_optimization_csv(path: Path, snapshots: list[ScanSnapshot], target_ssid: str) -> None:
+    payload = build_optimization_payload(snapshots=snapshots, target_ssid=target_ssid)
+    room_summaries = payload["optimization"]["room_summaries"]  # type: ignore[index]
+    plan_items = payload["optimization"]["improvement_plan"]  # type: ignore[index]
+    plan_by_room = {item["room_name"]: item for item in plan_items}
+
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=[
+                "target_ssid",
+                "room_name",
+                "classification",
+                "confidence",
+                "strongest_target_rssi_dbm",
+                "dominant_target_band",
+                "target_absent_count",
+                "target_present_count",
+                "high_congestion_observations",
+                "environment_relative_label",
+                "priority_level",
+                "priority_rank",
+                "observed_issue",
+                "suggested_next_step",
+            ],
+        )
+        writer.writeheader()
+        for summary in room_summaries:
+            plan = plan_by_room.get(summary["room_name"], {})
+            writer.writerow(
+                {
+                    "target_ssid": target_ssid,
+                    "room_name": summary["room_name"],
+                    "classification": summary["classification"],
+                    "confidence": summary["confidence"],
+                    "strongest_target_rssi_dbm": summary["strongest_target_rssi_dbm"],
+                    "dominant_target_band": summary["dominant_target_band"],
+                    "target_absent_count": summary["target_absent_count"],
+                    "target_present_count": summary["target_present_count"],
+                    "high_congestion_observations": summary["high_congestion_observations"],
+                    "environment_relative_label": summary["environment_relative_label"],
+                    "priority_level": plan.get("priority_level", "N/A"),
+                    "priority_rank": plan.get("priority_rank", ""),
+                    "observed_issue": plan.get("observed_issue", ""),
+                    "suggested_next_step": plan.get("suggested_next_step", ""),
+                }
+            )
+
+
+def export_optimization_text(path: Path, snapshots: list[ScanSnapshot], target_ssid: str) -> None:
+    payload = build_optimization_payload(snapshots=snapshots, target_ssid=target_ssid)
+    optimization = payload["optimization"]  # type: ignore[index]
+    lines = [
+        "WiFi Network Analyzer Optimization Plan",
+        f"Generated: {payload['generated_at']}",
+        f"Target SSID: {target_ssid}",
+        f"Snapshots analyzed: {payload['snapshot_count']}",
+        f"Rooms analyzed: {payload['room_count']}",
+        "",
+        "Summary:",
+    ]
+    for line in optimization["summary_lines"]:
+        lines.append(f"- {line}")
+    lines.append("")
+    lines.append("Room Coverage:")
+    for room in optimization["room_summaries"]:
+        lines.append(
+            f"- {room['room_name']}: {room['classification']} ({room['confidence']}), "
+            f"best observed RSSI {room['strongest_target_rssi_dbm']} dBm, dominant band {room['dominant_target_band'] or 'N/A'}"
+        )
+    lines.append("")
+    lines.append("Prioritized Improvement Plan:")
+    for item in optimization["improvement_plan"]:
+        lines.append(f"{item['priority_rank']}. {item['room_name']} [{item['priority_level']}] - {item['observed_issue']}")
+        lines.append(f"   Next step: {item['suggested_next_step']}")
     lines.append("")
     lines.append(f"Disclaimer: {payload['disclaimer']}")
     path.write_text("\n".join(lines), encoding="utf-8")
