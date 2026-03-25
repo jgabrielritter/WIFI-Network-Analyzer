@@ -5,6 +5,7 @@ from tkinter import ttk
 
 from .constants import APP_SIZE, APP_TITLE, MAX_PACKET_LINES, SENSITIVE_DATA_NOTICE
 from .models import DeviceRecord, InterfaceInfo, PacketRecord
+from .wifi_models import WiFiNetworkRecord
 from .privacy import mask_ip, mask_mac
 
 
@@ -19,7 +20,7 @@ class AnalyzerUI:
 
         top_notice = ttk.Label(
             self.root,
-            text=f"Scope: LAN device discovery, packet capture, and basic security checks. {SENSITIVE_DATA_NOTICE}",
+            text=f"Scope: Wi-Fi discovery/analysis + LAN device discovery, packet capture, and basic security checks. {SENSITIVE_DATA_NOTICE}",
             foreground="#8a5a00",
             wraplength=840,
             justify="left",
@@ -30,6 +31,7 @@ class AnalyzerUI:
         self.notebook.pack(expand=True, fill="both", padx=10, pady=8)
 
         self._build_devices_tab()
+        self._build_wifi_tab()
         self._build_capture_tab()
         self._build_security_tab()
 
@@ -81,6 +83,28 @@ class AnalyzerUI:
         self.packet_text = tk.Text(self.capture_frame, wrap="word", height=24)
         self.packet_text.pack(expand=True, fill="both", pady=6)
 
+    def _build_wifi_tab(self) -> None:
+        self.wifi_frame = ttk.Frame(self.notebook)
+        self.notebook.add(self.wifi_frame, text="Wi-Fi Analyzer")
+
+        controls = ttk.Frame(self.wifi_frame)
+        controls.pack(fill="x", pady=4)
+        self.wifi_scan_button = ttk.Button(controls, text="Scan Wi-Fi Networks")
+        self.wifi_scan_button.pack(side="left")
+
+        self.hide_hidden_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(controls, text="Hide hidden SSIDs", variable=self.hide_hidden_var).pack(side="left", padx=10)
+
+        self.wifi_message_var = tk.StringVar(value="Run a scan to view nearby wireless networks.")
+        ttk.Label(self.wifi_frame, textvariable=self.wifi_message_var, foreground="#444").pack(anchor="w")
+
+        columns = ("SSID", "BSSID", "Signal", "Channel", "Band", "Security")
+        self.wifi_table = ttk.Treeview(self.wifi_frame, columns=columns, show="headings", height=14)
+        for col in columns:
+            self.wifi_table.heading(col, text=col)
+            self.wifi_table.column(col, width=130 if col != "SSID" else 220)
+        self.wifi_table.pack(expand=True, fill="both", pady=6)
+
     def _build_security_tab(self) -> None:
         self.security_frame = ttk.Frame(self.notebook)
         self.notebook.add(self.security_frame, text="Security Checks")
@@ -107,6 +131,25 @@ class AnalyzerUI:
     def clear_devices(self) -> None:
         for row in self.device_table.get_children():
             self.device_table.delete(row)
+
+    def clear_wifi_networks(self) -> None:
+        for row in self.wifi_table.get_children():
+            self.wifi_table.delete(row)
+
+    def add_wifi_network(self, network: WiFiNetworkRecord) -> None:
+        channel_display = str(network.channel) if network.channel is not None else "N/A"
+        self.wifi_table.insert(
+            "",
+            "end",
+            values=(
+                network.display_ssid,
+                network.bssid or "N/A",
+                network.signal_display,
+                channel_display,
+                network.band,
+                network.security_mode,
+            ),
+        )
 
     def add_device(self, device: DeviceRecord, redact: bool = True) -> None:
         ip = mask_ip(device.ip) if redact else device.ip
@@ -137,3 +180,6 @@ class AnalyzerUI:
     def set_security_running(self, running: bool) -> None:
         self.security_button.configure(state="disabled" if running else "normal")
         self.stop_security_button.configure(state="normal" if running else "disabled")
+
+    def set_wifi_scan_running(self, running: bool) -> None:
+        self.wifi_scan_button.configure(state="disabled" if running else "normal")

@@ -12,6 +12,7 @@ from .network_scan_service import NetworkScanService
 from .packet_capture_service import PacketCaptureService
 from .security_checks import SecurityCheckService
 from .ui import AnalyzerUI
+from .wifi_scan_service import WiFiScanService
 
 
 class WiFiNetworkAnalyzerApp:
@@ -28,6 +29,7 @@ class WiFiNetworkAnalyzerApp:
         self.network_scan_service = NetworkScanService()
         self.packet_capture_service = PacketCaptureService()
         self.security_service = SecurityCheckService()
+        self.wifi_service = WiFiScanService()
         self.security_cancel = threading.Event()
 
         self._wire_actions()
@@ -41,6 +43,7 @@ class WiFiNetworkAnalyzerApp:
         self.ui.security_button.configure(command=self.start_security_scan)
         self.ui.stop_security_button.configure(command=lambda: self.security_cancel.set())
         self.ui.refresh_interfaces_button.configure(command=self._refresh_interfaces)
+        self.ui.wifi_scan_button.configure(command=self.start_wifi_scan)
 
     def _refresh_interfaces(self) -> None:
         self.interfaces = discover_interfaces()
@@ -94,6 +97,21 @@ class WiFiNetworkAnalyzerApp:
         if not started:
             self.ui.status_var.set("Packet capture is already running.")
             self.ui.set_capture_running(True)
+
+    def start_wifi_scan(self) -> None:
+        self.ui.clear_wifi_networks()
+        self.ui.set_wifi_scan_running(True)
+        self.ui.wifi_message_var.set("Scanning nearby wireless networks...")
+        self.ui.status_var.set("Running Wi-Fi scan...")
+
+        def _worker() -> None:
+            try:
+                result = self.wifi_service.scan_networks()
+                self.event_queue.put(UIEvent("wifi_scan_complete", {"result": result}))
+            except Exception as exc:
+                self.event_queue.put(UIEvent("error", {"title": "Wi-Fi Scan Error", "message": str(exc)}))
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def stop_packet_capture(self) -> None:
         self.packet_capture_service.stop()
@@ -159,10 +177,26 @@ class WiFiNetworkAnalyzerApp:
         elif event.event_type == "progress":
             self.ui.progress_var.set(event.payload["message"])
         elif event.event_type == "error":
+            self.ui.set_wifi_scan_running(False)
             self.ui.set_capture_running(self.packet_capture_service.running)
             self.ui.set_security_running(False)
             self.ui.status_var.set("Operation failed.")
             messagebox.showerror(event.payload.get("title", "Error"), event.payload.get("message", "Unknown error"))
+        elif event.event_type == "wifi_scan_complete":
+            result = event.payload["result"]
+            networks = result.networks
+            if self.ui.hide_hidden_var.get():
+                networks = [item for item in networks if not item.is_hidden]
+            for network in networks:
+                self.ui.add_wifi_network(network)
+            self.ui.set_wifi_scan_running(False)
+            if result.warning:
+                self.ui.wifi_message_var.set(result.warning)
+            elif not networks:
+                self.ui.wifi_message_var.set("No Wi-Fi networks found.")
+            else:
+                self.ui.wifi_message_var.set(f"Found {len(networks)} networks via {result.source}.")
+            self.ui.status_var.set("Wi-Fi scan complete.")
 
 
 def main() -> None:
