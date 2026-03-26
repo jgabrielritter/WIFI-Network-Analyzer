@@ -4,7 +4,7 @@ import queue
 import threading
 import tkinter as tk
 from pathlib import Path
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, simpledialog
 
 from .constants import UI_POLL_INTERVAL_MS
 from .dashboard_logic import compute_scan_summary, normalize_band_badge, normalize_security_chip
@@ -22,8 +22,13 @@ from .reports import (
     export_optimization_csv,
     export_optimization_json,
     export_optimization_text,
+    export_floorplan_html,
+    export_floorplan_json,
+    export_floorplan_text,
     export_text_report,
 )
+from .floorplan_models import FloorPlanLayout
+from .room_map import FloorPlanStore
 from .scan_history import ScanContext, ScanHistoryStore
 from .security_checks import SecurityCheckService
 from .ui import AnalyzerUI
@@ -33,6 +38,7 @@ from .scan_comparison import compare_snapshots
 from .trend_analysis import build_environment_score_trend
 from .troubleshooting_engine import build_troubleshooting_summary
 from .wifi_scan_service import WiFiScanService
+from .visual_coverage_plan import FloorPlanCoverageReport, build_floor_plan_coverage, describe_ap_placement
 
 
 class WiFiNetworkAnalyzerApp:
@@ -59,6 +65,12 @@ class WiFiNetworkAnalyzerApp:
         self.analytics_engine = WiFiAnalyticsEngine()
         self.security_cancel = threading.Event()
         self.latest_optimization_payload: dict[str, object] | None = None
+        self.floorplan_store = FloorPlanStore()
+        self.active_plan: FloorPlanLayout = self.floorplan_store.create_plan(name="My Floor Plan")
+        self.current_floorplan_report: FloorPlanCoverageReport | None = None
+        self._canvas_item_to_entity: dict[int, tuple[str, str]] = {}
+        self._drag_entity: tuple[str, str] | None = None
+        self._background_image = None
 
         self._wire_actions()
         self._refresh_interfaces()
@@ -90,6 +102,20 @@ class WiFiNetworkAnalyzerApp:
         self.ui.export_optimization_csv_button.configure(command=lambda: self._export(mode="optimization", fmt="csv"))
         self.ui.export_optimization_txt_button.configure(command=lambda: self._export(mode="optimization", fmt="txt"))
         self.ui.bind_run_optimization(self._run_optimization_guidance)
+        self.ui.floorplan_new_button.configure(command=self._new_floorplan)
+        self.ui.floorplan_add_room_button.configure(command=self._add_floorplan_room)
+        self.ui.floorplan_add_ap_button.configure(command=self._add_floorplan_ap_marker)
+        self.ui.floorplan_load_image_button.configure(command=self._load_floorplan_background)
+        self.ui.floorplan_save_button.configure(command=self._save_floorplan)
+        self.ui.floorplan_load_button.configure(command=self._load_floorplan)
+        self.ui.floorplan_render_button.configure(command=self._render_floorplan_coverage)
+        self.ui.floorplan_export_json_button.configure(command=lambda: self._export_floorplan("json"))
+        self.ui.floorplan_export_text_button.configure(command=lambda: self._export_floorplan("txt"))
+        self.ui.floorplan_export_html_button.configure(command=lambda: self._export_floorplan("html"))
+        self.ui.floorplan_canvas.bind("<ButtonPress-1>", self._on_floorplan_press)
+        self.ui.floorplan_canvas.bind("<B1-Motion>", self._on_floorplan_drag)
+        self.ui.floorplan_canvas.bind("<ButtonRelease-1>", lambda _evt: self._set_drag_entity(None))
+        self._draw_floorplan()
 
     def _refresh_interfaces(self) -> None:
         self.interfaces = discover_interfaces()
@@ -471,6 +497,193 @@ class WiFiNetworkAnalyzerApp:
             self.ui.wifi_message_var.set(f"Optimization plan prepared for {target_ssid} across {payload['room_count']} room group(s).")
         except Exception as exc:
             messagebox.showerror("Guided Optimization", str(exc))
+
+    def _new_floorplan(self) -> None:
+        name = self.ui.floorplan_name_var.get().strip() or "Floor Plan"
+        self.active_plan = self.floorplan_store.create_plan(name=name)
+        self.current_floorplan_report = None
+        self._draw_floorplan()
+        self.ui.status_var.set(f"Created new floor plan: {name}")
+
+    def _add_floorplan_room(self) -> None:
+        name = simpledialog.askstring("Add Room", "Room name:")
+        if not name:
+            return
+        x = 70 + ((len(self.active_plan.rooms) % 5) * 160)
+        y = 80 + ((len(self.active_plan.rooms) // 5) * 110)
+        room = self.floorplan_store.add_room(self.active_plan.plan_id, room_name=name, x=x, y=y)
+        room.linked_labels = [name]
+        self._draw_floorplan()
+        self.ui.status_var.set(f"Added room '{room.room_name}'. Drag room boxes to reposition.")
+
+    def _add_floorplan_ap_marker(self) -> None:
+        label = simpledialog.askstring("Add AP Marker", "AP/router label:", initialvalue="Main AP")
+        if not label:
+            return
+        x = 80 + (len(self.active_plan.ap_markers) * 80)
+        marker = self.floorplan_store.add_ap_marker(self.active_plan.plan_id, label=label, x=x, y=50, marker_type="ap")
+        self._draw_floorplan()
+        self.ui.status_var.set(f"Added AP marker '{marker.label}'.")
+
+    def _load_floorplan_background(self) -> None:
+        path = filedialog.askopenfilename(
+            title="Select floor-plan background image",
+            filetypes=[("Image files", "*.png *.gif *.ppm *.pgm"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        self.active_plan.background_image_path = path
+        self._draw_floorplan()
+
+    def _save_floorplan(self) -> None:
+        path = filedialog.asksaveasfilename(
+            title="Save floor plan layout",
+            defaultextension=".json",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+            initialfile="floor_plan_layout.json",
+        )
+        if not path:
+            return
+        self.floorplan_store.save_to_file(self.active_plan.plan_id, Path(path))
+        self.ui.status_var.set(f"Saved floor plan to {Path(path).name}.")
+
+    def _load_floorplan(self) -> None:
+        path = filedialog.askopenfilename(
+            title="Load floor plan layout",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        self.active_plan = self.floorplan_store.load_from_file(Path(path))
+        self.current_floorplan_report = None
+        self._draw_floorplan()
+        self.ui.status_var.set(f"Loaded floor plan '{self.active_plan.name}'.")
+
+    def _render_floorplan_coverage(self) -> None:
+        target = self.ui.floorplan_target_ssid()
+        if not target:
+            messagebox.showinfo("Floor Plan Coverage", "Enter a target SSID for map coverage mode.")
+            return
+        snapshots = self.history.list_snapshots()
+        if not snapshots:
+            messagebox.showinfo("Floor Plan Coverage", "Run Wi-Fi scans and label rooms before rendering coverage.")
+            return
+        self.current_floorplan_report = build_floor_plan_coverage(plan=self.active_plan, snapshots=snapshots, target_ssid=target)
+        self._draw_floorplan()
+        review = describe_ap_placement(plan=self.active_plan, report=self.current_floorplan_report)
+        self.ui.set_floorplan_summary(self.current_floorplan_report.summary_lines + ["", "AP placement review:"] + [f"- {line}" for line in review] + ["", f"Disclaimer: {self.current_floorplan_report.disclaimer}"])
+        self.ui.wifi_message_var.set(
+            f"Visual coverage plan updated for '{target}' ({len(self.current_floorplan_report.room_states)} mapped rooms)."
+        )
+
+    def _export_floorplan(self, fmt: str) -> None:
+        target = self.ui.floorplan_target_ssid()
+        if not target:
+            messagebox.showinfo("Export Visual Plan", "Enter target SSID first.")
+            return
+        snapshots = self.history.list_snapshots()
+        if not snapshots:
+            messagebox.showinfo("Export Visual Plan", "No scan history available.")
+            return
+        ext = {"json": ".json", "txt": ".txt", "html": ".html"}[fmt]
+        path = filedialog.asksaveasfilename(
+            title="Export visual coverage plan",
+            defaultextension=ext,
+            filetypes=[(f"{fmt.upper()} files", f"*{ext}"), ("All files", "*.*")],
+            initialfile="wifi_visual_coverage_plan",
+        )
+        if not path:
+            return
+        out_path = Path(path)
+        if fmt == "json":
+            export_floorplan_json(out_path, self.active_plan, snapshots, target)
+        elif fmt == "html":
+            export_floorplan_html(out_path, self.active_plan, snapshots, target)
+        else:
+            export_floorplan_text(out_path, self.active_plan, snapshots, target)
+        self.ui.status_var.set(f"Visual plan export successful: {out_path.name}")
+
+    def _draw_floorplan(self) -> None:
+        canvas = self.ui.floorplan_canvas
+        canvas.delete("all")
+        self._canvas_item_to_entity.clear()
+        if self.active_plan.background_image_path:
+            try:
+                self._background_image = tk.PhotoImage(file=self.active_plan.background_image_path)
+                canvas.create_image(0, 0, image=self._background_image, anchor="nw")
+            except Exception:
+                self._background_image = None
+                canvas.create_text(8, 8, text="Background image failed to load", anchor="nw", fill="#aa0000")
+
+        status_by_room = {item.room_id: item for item in (self.current_floorplan_report.room_states if self.current_floorplan_report else [])}
+        color = {
+            "Strong coverage": "#b9e6b3",
+            "Good coverage": "#d3efce",
+            "Usable coverage": "#f8ecae",
+            "Weak coverage": "#ffd59f",
+            "Likely weak zone": "#ffb878",
+            "Likely dead zone": "#ff9b9b",
+            "Insufficient data": "#e0e0e0",
+        }
+        for room in self.active_plan.rooms:
+            state = status_by_room.get(room.room_id)
+            fill = color.get(state.status if state else "Insufficient data", "#e0e0e0")
+            rect = canvas.create_rectangle(room.x, room.y, room.x + room.width, room.y + room.height, fill=fill, outline="#555", width=2)
+            label_lines = [room.room_name]
+            if state:
+                label_lines.append(state.status)
+                label_lines.append(f"#{state.priority_rank} | scans: {state.scan_count}")
+            text = canvas.create_text(room.x + 8, room.y + 8, text="\\n".join(label_lines), anchor="nw", width=max(60, room.width - 16))
+            self._canvas_item_to_entity[rect] = ("room", room.room_id)
+            self._canvas_item_to_entity[text] = ("room", room.room_id)
+
+        for marker in self.active_plan.ap_markers:
+            oval = canvas.create_oval(marker.x - 8, marker.y - 8, marker.x + 8, marker.y + 8, fill="#4b6fff", outline="#1f2e7a")
+            text = canvas.create_text(marker.x + 10, marker.y - 12, text=f"{marker.label} ({marker.marker_type})", anchor="nw", fill="#1f2e7a")
+            self._canvas_item_to_entity[oval] = ("ap", marker.marker_id)
+            self._canvas_item_to_entity[text] = ("ap", marker.marker_id)
+
+    def _set_drag_entity(self, value: tuple[str, str] | None) -> None:
+        self._drag_entity = value
+
+    def _on_floorplan_press(self, event: tk.Event) -> None:
+        item_ids = self.ui.floorplan_canvas.find_overlapping(event.x, event.y, event.x, event.y)
+        entity = None
+        for item_id in reversed(item_ids):
+            entity = self._canvas_item_to_entity.get(item_id)
+            if entity:
+                break
+        self._set_drag_entity(entity)
+        if not entity:
+            return
+        entity_type, entity_id = entity
+        if entity_type == "room" and self.current_floorplan_report:
+            state = next((item for item in self.current_floorplan_report.room_states if item.room_id == entity_id), None)
+            if state:
+                lines = [
+                    f"Room: {state.room_name}",
+                    f"Status: {state.status}",
+                    f"Strongest RSSI: {state.strongest_target_rssi_dbm}",
+                    f"Strongest BSSID: {state.strongest_observed_bssid or 'N/A'}",
+                    f"Dominant band: {state.dominant_band or 'N/A'}",
+                    f"Security: {state.security_mode or 'N/A'}",
+                    f"Latest scan: {state.latest_scan_at or 'N/A'}",
+                    f"Evidence: {state.confidence_label} | scans={state.scan_count}",
+                    f"Target present/absent: {state.target_present_count}/{state.target_absent_count}",
+                    f"Priority: {state.priority_rank}",
+                ]
+                lines.extend([f"- {note}" for note in state.notes])
+                self.ui.set_floorplan_room_details(lines)
+
+    def _on_floorplan_drag(self, event: tk.Event) -> None:
+        if not self._drag_entity:
+            return
+        entity_type, entity_id = self._drag_entity
+        if entity_type == "room":
+            self.floorplan_store.move_room(self.active_plan.plan_id, entity_id, x=event.x - 70, y=event.y - 45)
+        elif entity_type == "ap":
+            self.floorplan_store.move_ap_marker(self.active_plan.plan_id, entity_id, x=event.x, y=event.y)
+        self._draw_floorplan()
 
     def _poll_events(self) -> None:
         while True:

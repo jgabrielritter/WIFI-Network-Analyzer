@@ -13,6 +13,8 @@ from .troubleshooting_engine import build_troubleshooting_summary
 from .wifi_analytics import WiFiAnalyticsEngine, WiFiAnalyticsReport, group_key_for_network
 from .wifi_models import WiFiNetworkRecord
 from .optimization_engine import OptimizationEngine, optimization_result_to_dict
+from .visual_coverage_plan import build_floor_plan_coverage, coverage_report_to_dict, describe_ap_placement
+from .floorplan_models import FloorPlanLayout
 
 
 def _network_to_dict(
@@ -390,3 +392,71 @@ def export_optimization_text(path: Path, snapshots: list[ScanSnapshot], target_s
     lines.append("")
     lines.append(f"Disclaimer: {payload['disclaimer']}")
     path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def build_floorplan_export_payload(plan: FloorPlanLayout, snapshots: list[ScanSnapshot], target_ssid: str) -> dict[str, object]:
+    report = build_floor_plan_coverage(plan=plan, snapshots=snapshots, target_ssid=target_ssid)
+    payload = coverage_report_to_dict(plan=plan, report=report)
+    payload["ap_placement_review"] = describe_ap_placement(plan=plan, report=report)
+    return payload
+
+
+def export_floorplan_json(path: Path, plan: FloorPlanLayout, snapshots: list[ScanSnapshot], target_ssid: str) -> None:
+    payload = build_floorplan_export_payload(plan=plan, snapshots=snapshots, target_ssid=target_ssid)
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def export_floorplan_text(path: Path, plan: FloorPlanLayout, snapshots: list[ScanSnapshot], target_ssid: str) -> None:
+    payload = build_floorplan_export_payload(plan=plan, snapshots=snapshots, target_ssid=target_ssid)
+    coverage = payload["coverage"]
+    lines = [
+        "WiFi Network Analyzer Visual Coverage Plan",
+        f"Floor plan: {coverage['plan_name']}",
+        f"Target SSID: {coverage['target_ssid']}",
+        f"Generated: {coverage['generated_at']}",
+        "",
+        "Summary:",
+    ]
+    for line in coverage["summary_lines"]:
+        lines.append(f"- {line}")
+    lines.append("")
+    lines.append("Room states:")
+    for room in coverage["room_states"]:
+        lines.append(
+            f"{room['priority_rank']}. {room['room_name']} - {room['status']} | strongest RSSI {room['strongest_target_rssi_dbm']} | confidence {room['confidence_label']}"
+        )
+    lines.append("")
+    lines.append("AP placement review:")
+    for line in payload["ap_placement_review"]:
+        lines.append(f"- {line}")
+    lines.append("")
+    lines.append(f"Disclaimer: {coverage['disclaimer']}")
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def export_floorplan_html(path: Path, plan: FloorPlanLayout, snapshots: list[ScanSnapshot], target_ssid: str) -> None:
+    payload = build_floorplan_export_payload(plan=plan, snapshots=snapshots, target_ssid=target_ssid)
+    coverage = payload["coverage"]
+    room_rows = "".join(
+        f"<tr><td>{room['priority_rank']}</td><td>{room['room_name']}</td><td>{room['status']}</td><td>{room['strongest_target_rssi_dbm']}</td><td>{room['confidence_label']}</td></tr>"
+        for room in coverage["room_states"]
+    )
+    summary = "".join(f"<li>{line}</li>" for line in coverage["summary_lines"])
+    review = "".join(f"<li>{line}</li>" for line in payload["ap_placement_review"])
+    html = f"""<!doctype html>
+<html><head><meta charset='utf-8'><title>Visual Coverage Plan</title></head>
+<body>
+<h1>WiFi Visual Coverage Plan</h1>
+<p><strong>Floor plan:</strong> {coverage['plan_name']}</p>
+<p><strong>Target SSID:</strong> {coverage['target_ssid']}</p>
+<p><strong>Generated:</strong> {coverage['generated_at']}</p>
+<h2>Summary</h2><ul>{summary}</ul>
+<h2>Room-by-room status</h2>
+<table border='1' cellspacing='0' cellpadding='6'>
+<tr><th>Priority</th><th>Room</th><th>Status</th><th>Strongest RSSI</th><th>Confidence</th></tr>
+{room_rows}
+</table>
+<h2>AP placement review</h2><ul>{review}</ul>
+<p><em>{coverage['disclaimer']}</em></p>
+</body></html>"""
+    path.write_text(html, encoding="utf-8")
