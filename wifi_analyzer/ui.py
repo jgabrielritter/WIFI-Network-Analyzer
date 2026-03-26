@@ -42,6 +42,7 @@ class AnalyzerUI:
         self.notebook.pack(expand=True, fill="both", padx=10, pady=8)
 
         self._build_wifi_dashboard_tab()
+        self._build_floorplan_tab()
         self._build_devices_tab()
         self._build_capture_tab()
         self._build_security_tab()
@@ -228,6 +229,64 @@ class AnalyzerUI:
         self.run_optimization_button.pack(side="left")
         self.optimization_summary_text = tk.Text(optimization, wrap="word", height=10)
         self.optimization_summary_text.pack(fill="x", padx=6, pady=(2, 6))
+
+    def _build_floorplan_tab(self) -> None:
+        self.floorplan_frame = ttk.Frame(self.notebook)
+        self.notebook.add(self.floorplan_frame, text="Floor Plan")
+
+        controls = ttk.LabelFrame(self.floorplan_frame, text="Map Controls")
+        controls.pack(fill="x", padx=4, pady=4)
+        self.floorplan_name_var = tk.StringVar(value="My Floor Plan")
+        self.floorplan_target_ssid_var = tk.StringVar(value="")
+
+        ttk.Label(controls, text="Map Name:").pack(side="left", padx=(6, 2))
+        ttk.Entry(controls, textvariable=self.floorplan_name_var, width=18).pack(side="left", padx=(0, 8))
+        self.floorplan_new_button = ttk.Button(controls, text="New Map")
+        self.floorplan_new_button.pack(side="left", padx=2)
+        self.floorplan_add_room_button = ttk.Button(controls, text="Add Room")
+        self.floorplan_add_room_button.pack(side="left", padx=2)
+        self.floorplan_add_ap_button = ttk.Button(controls, text="Add AP Marker")
+        self.floorplan_add_ap_button.pack(side="left", padx=2)
+        self.floorplan_load_image_button = ttk.Button(controls, text="Load Background")
+        self.floorplan_load_image_button.pack(side="left", padx=2)
+        self.floorplan_save_button = ttk.Button(controls, text="Save Map")
+        self.floorplan_save_button.pack(side="right", padx=2)
+        self.floorplan_load_button = ttk.Button(controls, text="Load Map")
+        self.floorplan_load_button.pack(side="right", padx=2)
+
+        analysis_bar = ttk.Frame(self.floorplan_frame)
+        analysis_bar.pack(fill="x", padx=4, pady=(0, 4))
+        ttk.Label(analysis_bar, text="Target SSID:").pack(side="left")
+        ttk.Entry(analysis_bar, textvariable=self.floorplan_target_ssid_var, width=18).pack(side="left", padx=(4, 8))
+        self.floorplan_render_button = ttk.Button(analysis_bar, text="Render Coverage")
+        self.floorplan_render_button.pack(side="left", padx=2)
+        self.floorplan_export_json_button = ttk.Button(analysis_bar, text="Export Plan JSON")
+        self.floorplan_export_json_button.pack(side="right", padx=2)
+        self.floorplan_export_text_button = ttk.Button(analysis_bar, text="Export Plan TXT")
+        self.floorplan_export_text_button.pack(side="right", padx=2)
+        self.floorplan_export_html_button = ttk.Button(analysis_bar, text="Export Plan HTML")
+        self.floorplan_export_html_button.pack(side="right", padx=2)
+
+        main = ttk.Frame(self.floorplan_frame)
+        main.pack(expand=True, fill="both", padx=4, pady=4)
+        main.columnconfigure(0, weight=3)
+        main.columnconfigure(1, weight=2)
+        main.rowconfigure(0, weight=1)
+
+        canvas_wrap = ttk.LabelFrame(main, text="Room Map")
+        canvas_wrap.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        self.floorplan_canvas = tk.Canvas(canvas_wrap, bg="#fafafa", width=960, height=540, highlightthickness=0)
+        self.floorplan_canvas.pack(expand=True, fill="both", padx=4, pady=4)
+
+        right = ttk.Frame(main)
+        right.grid(row=0, column=1, sticky="nsew")
+        right.rowconfigure(0, weight=1)
+        right.rowconfigure(1, weight=1)
+        right.columnconfigure(0, weight=1)
+        self.floorplan_room_details_text = tk.Text(right, wrap="word", height=16)
+        self.floorplan_room_details_text.grid(row=0, column=0, sticky="nsew", pady=(0, 6))
+        self.floorplan_summary_text = tk.Text(right, wrap="word", height=14)
+        self.floorplan_summary_text.grid(row=1, column=0, sticky="nsew")
 
     def _build_devices_tab(self) -> None:
         self.devices_frame = ttk.Frame(self.notebook)
@@ -450,6 +509,20 @@ class AnalyzerUI:
 
     def bind_run_optimization(self, callback: callable) -> None:
         self.run_optimization_button.configure(command=callback)
+
+    def floorplan_target_ssid(self) -> str | None:
+        value = self.floorplan_target_ssid_var.get().strip()
+        return value or None
+
+    def set_floorplan_room_details(self, lines: list[str]) -> None:
+        self.floorplan_room_details_text.delete("1.0", tk.END)
+        for line in lines:
+            self.floorplan_room_details_text.insert(tk.END, f"{line}\n")
+
+    def set_floorplan_summary(self, lines: list[str]) -> None:
+        self.floorplan_summary_text.delete("1.0", tk.END)
+        for line in lines:
+            self.floorplan_summary_text.insert(tk.END, f"{line}\n")
 
     def add_device(self, device: DeviceRecord, redact: bool = True) -> None:
         ip = mask_ip(device.ip) if redact else device.ip
